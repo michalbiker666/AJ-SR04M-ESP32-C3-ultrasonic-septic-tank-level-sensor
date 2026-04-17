@@ -1,0 +1,155 @@
+esphome:
+  name: szambo
+  friendly_name: Szambo
+  on_boot:
+    priority: 800
+    then:
+      - logger.log: "OKNO SERWISOWE: 10s na USB/OTA..."
+      - delay: 10s
+      - script.execute: wykonaj_pomiar_i_sen
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: ESP32C3
+  framework:
+    type: arduino
+
+deep_sleep:
+  id: ds_control
+  sleep_duration: 24h
+
+logger:
+  level: DEBUG
+  baud_rate: 0 
+
+safe_mode:
+  disabled: true
+
+api:
+
+ota:
+  - platform: esphome
+    password: "12345678"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  power_save_mode: NONE
+  reboot_timeout: 0s 
+
+uart:
+  id: uart_bus
+  rx_pin: GPIO4
+  tx_pin: GPIO3 
+  baud_rate: 9600
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+
+globals:
+  - id: pomiary
+    type: float[3]
+    initial_value: '{0.0, 0.0, 0.0}'
+
+binary_sensor:
+  - platform: template
+    name: "Szambo alarm pełne"
+    id: alarm_pelne
+    device_class: problem
+
+sensor:
+  - platform: template
+    name: "Szambo odległość"
+    id: odleglosc_cm
+    unit_of_measurement: "cm"
+    accuracy_decimals: 1
+    state_class: measurement
+    icon: "mdi:ruler"
+
+  - platform: template
+    name: "Szambo poziom"
+    id: poziom_procent
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    icon: "mdi:water-well"
+
+text_sensor:
+  - platform: template
+    name: "Szambo status"
+    id: status_tekst
+    icon: "mdi:information"
+
+script:
+  - id: wykonaj_pomiar_i_sen
+    mode: restart
+    then:
+      # 1. ŁĄCZENIE Z WIFI
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 15s 
+      
+      # 2. POMIAR
+      - delay: 1s
+      - lambda: |-
+          uint32_t start_globalny = millis();
+          int zebrane = 0;
+          int proby = 0; 
+          bool warm_up_zrobiony = false;
+          while (zebrane < 3 && proby < 12 && (millis() - start_globalny < 9000)) {
+            proby++;
+            yield(); 
+            while(id(uart_bus).available()) { uint8_t trash; id(uart_bus).read_byte(&trash); yield(); }
+            delay(50); 
+            uint8_t trigger = 0x55; 
+            id(uart_bus).write_array(&trigger, 1);
+            uint32_t wait_start = millis();
+            uint8_t buf[4];
+            int idx = 0;
+            while (millis() - wait_start < 400 && idx < 4) {
+              yield();
+              if (id(uart_bus).available()) {
+                uint8_t b;
+                if (id(uart_bus).read_byte(&b)) {
+                  if (idx == 0 && b != 0xFF) continue; 
+                  buf[idx++] = b;
+                }
+              }
+            }
+            if (idx == 4) {
+              uint8_t checksum = (buf[0] + buf[1] + buf[2]) & 0xFF;
+              if (checksum == buf[3]) {
+                int mm = (buf[1] << 8) | buf[2];
+                if (mm >= 250 && mm <= 4500) {
+                  if (!warm_up_zrobiony) { warm_up_zrobiony = true; } 
+                  else { id(pomiary)[zebrane] = mm / 10.0; zebrane++; }
+                }
+              }
+            }
+            delay(150); 
+          }
+          if (zebrane == 3) {
+            for (int i = 0; i < 2; i++) {
+              for (int j = i+1; j < 3; j++) {
+                if (id(pomiary)[j] < id(pomiary)[i]) {
+                  float t = id(pomiary)[i]; id(pomiary)[i] = id(pomiary)[j]; id(pomiary)[j] = t;
+                }
+              }
+            }
+            float mediana = id(pomiary)[1];
+            id(odleglosc_cm).publish_state(mediana);
+            float p = (265.0 - mediana) / (265.0 - 65.0) * 100.0f;
+            if (p < 0.0f) p = 0.0f;
+            if (p > 100.0f) p = 100.0f;
+            id(poziom_procent).publish_state(p);
+            if (p >= 85) { id(status_tekst).publish_state("PEŁNE!"); id(alarm_pelne).publish_state(true); } 
+            else { id(alarm_pelne).publish_state(false); id(status_tekst).publish_state(p >= 60 ? "Wysokie" : "OK"); }
+          } else {
+             id(status_tekst).publish_state("BŁĄD ODCZYTU");
+          }
+
+      # 3. CZAS DLA SERWERA I SEN
+      - delay: 15s 
+      - deep_sleep.enter: ds_control
