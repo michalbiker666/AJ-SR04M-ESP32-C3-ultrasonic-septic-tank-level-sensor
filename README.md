@@ -1,4 +1,4 @@
-# ESP32-C3 Septic Tank Level Sensor (ESPHome)
+# AJ-SR04M ESP32-C3 Septic Tank Level Sensor (ESPHome)
 
 An ultra-low-power, DIY smart home solution for monitoring septic tank levels. This project is built using **ESPHome** and integrates seamlessly with **Home Assistant**.
 
